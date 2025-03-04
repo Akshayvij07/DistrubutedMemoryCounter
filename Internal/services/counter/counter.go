@@ -1,0 +1,47 @@
+package counter
+
+import (
+	"log"
+	"sync"
+)
+
+type CounterService interface {
+	Increment(requestID string)
+	WasProcessed(requestID string) bool
+	GetCount() int
+}
+
+type Counter struct {
+	mu      sync.Mutex
+	count   int
+	seenIDs map[string]bool
+}
+
+func NewCounter() *Counter {
+	return &Counter{
+		seenIDs: make(map[string]bool),
+	}
+}
+
+func (c *Counter) Increment(requestID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.seenIDs[requestID] {
+		log.Printf("Request %s already processed. Skipping.", requestID)
+		return
+	}
+	c.count++
+	c.seenIDs[requestID] = true
+}
+
+func (c *Counter) GetCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count
+}
+
+func (c *Counter) WasProcessed(requestID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seenIDs[requestID]
+}
