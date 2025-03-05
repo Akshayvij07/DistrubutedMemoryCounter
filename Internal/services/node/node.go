@@ -11,6 +11,9 @@ import (
 )
 
 type Registry interface {
+	MarkPeerResponsive(peer string)
+	IsPeerUnresponsive(id string) bool
+	MarkPeerUnresponsive(peer string)
 	RegisterNode(address string) string
 	ListNodes() []Node
 	RemoveNode(id string)
@@ -18,13 +21,16 @@ type Registry interface {
 	MergeNodes(newNodes []Node)
 	Cleanup(timeout time.Duration)
 	Size() int
+	// AppendCounter(peer string)
 }
 
 // Node represents a service instance
 type Node struct {
-	ID       string
-	Address  string
-	LastSeen time.Time
+	ID           string
+	Address      string
+	Port         string
+	Unresponsive bool
+	LastSeen     time.Time
 }
 
 func (n Node) String() string {
@@ -39,20 +45,21 @@ type ServiceRegistry struct {
 
 func NewServiceRegistry() *ServiceRegistry {
 	return &ServiceRegistry{
+		mu:    sync.Mutex{},
 		nodes: make(map[string]*Node),
 	}
 }
 
 // RegisterNode adds a node to the registry
-func (r *ServiceRegistry) RegisterNode(address string) string {
+func (r *ServiceRegistry) RegisterNode(port string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	address = "localhost:" + address
+	address := "localhost:" + port
 
 	node, exists := r.nodes[address]
 	if !exists {
-		node = &Node{ID: address, Address: address, LastSeen: time.Now()}
+		node = &Node{ID: address, Address: address, Port: port, LastSeen: time.Now()}
 		log.Printf("Node registered: %s\n", address)
 		r.nodes[address] = node
 	} else {
@@ -156,3 +163,72 @@ func (r *ServiceRegistry) Size() int {
 	defer r.mu.Unlock()
 	return len(r.nodes)
 }
+
+func (n *ServiceRegistry) MarkPeerUnresponsive(peer string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	for i, p := range n.nodes {
+		if p.Address == peer {
+			n.nodes[i].Unresponsive = true
+			n.nodes[i].LastSeen = time.Now()
+			break
+		}
+	}
+}
+
+func (n *ServiceRegistry) MarkPeerResponsive(peer string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	for i, p := range n.nodes {
+		if p.Address == peer {
+			n.nodes[i].Unresponsive = false
+			n.nodes[i].LastSeen = time.Now()
+			break
+		}
+	}
+}
+
+func (sr *ServiceRegistry) UpdateLastSeen(nodeID string) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if node, exists := sr.nodes[nodeID]; exists {
+		node.LastSeen = time.Now()
+	}
+}
+
+func (sr *ServiceRegistry) RemoveUnresponsiveNodes(timeout time.Duration) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	for id, node := range sr.nodes {
+		if time.Since(node.LastSeen) > timeout {
+			delete(sr.nodes, id)
+			log.Printf("Node %s removed due to timeout\n", id)
+		}
+	}
+}
+
+func (sr *ServiceRegistry) IsPeerUnresponsive(id string) bool {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if node, exists := sr.nodes[id]; exists {
+		return node.Unresponsive
+	}
+	return false
+}
+
+// func (sr *ServiceRegistry) AppendCounter(peer string) {
+// 	sr.mu.Lock()
+// 	defer sr.mu.Unlock()
+
+// 	if node, exists := sr.nodes[peer]; exists {
+// 		if _, ok := node.Counters[peer]; ok {
+// 			node.Counters[peer] += 1
+// 		}
+// 	}
+
+// }
