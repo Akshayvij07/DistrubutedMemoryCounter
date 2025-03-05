@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -10,10 +11,13 @@ import (
 )
 
 type Registry interface {
-	RegisterNode(port string) string
+	RegisterNode(address string) string
 	ListNodes() []Node
 	RemoveNode(id string)
-	GetRandomPeer(exclude string) string
+	GetRandomPeer(exclude string) (string, bool)
+	MergeNodes(newNodes []Node)
+	Cleanup(timeout time.Duration)
+	Size() int
 }
 
 // Node represents a service instance
@@ -21,6 +25,10 @@ type Node struct {
 	ID       string
 	Address  string
 	LastSeen time.Time
+}
+
+func (n Node) String() string {
+	return fmt.Sprintf("Node{ID: %s, Address: %s, LastSeen: %s}", n.ID, n.Address, n.LastSeen.Format(time.RFC3339))
 }
 
 // ServiceRegistry stores active nodes
@@ -36,21 +44,22 @@ func NewServiceRegistry() *ServiceRegistry {
 }
 
 // RegisterNode adds a node to the registry
-func (r *ServiceRegistry) RegisterNode(port string) string {
+func (r *ServiceRegistry) RegisterNode(address string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	id := "localhost:" + port
 
-	node, exists := r.nodes[id] // Get the node if it exists
+	address = "localhost:" + address
+
+	node, exists := r.nodes[address]
 	if !exists {
-		node = &Node{ID: id, Address: port, LastSeen: time.Now()}
-		log.Printf("Node registered: %s\n", id)
-		r.nodes[id] = node // Add to registry only when it's a new node
+		node = &Node{ID: address, Address: address, LastSeen: time.Now()}
+		log.Printf("Node registered: %s\n", address)
+		r.nodes[address] = node
 	} else {
-		log.Printf("Node already exists, updating LastSeen: %s\n", id)
+		log.Printf("Node already exists, updating LastSeen: %s\n", address)
 	}
-	node.LastSeen = time.Now() // Update LastSeen
-	return id
+	node.LastSeen = time.Now()
+	return address
 }
 
 // RemoveNode removes a node from the registry
@@ -77,35 +86,40 @@ func (r *ServiceRegistry) ListNodes() []Node {
 	})
 	return nodes
 }
+
+// ListNodesAddress returns unique node addresses
 func (r *ServiceRegistry) ListNodesAddress() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	nodes := []string{}
+	uniqueAddresses := make(map[string]struct{})
 	for _, node := range r.nodes {
-		nodes = append(nodes, node.Address)
+		uniqueAddresses[node.Address] = struct{}{}
 	}
 
-	return nodes
+	addresses := make([]string, 0, len(uniqueAddresses))
+	for addr := range uniqueAddresses {
+		addresses = append(addresses, addr)
+	}
+
+	return addresses
 }
 
+// MergeNodes merges a list of nodes into the registry
 func (r *ServiceRegistry) MergeNodes(newNodes []Node) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for _, node := range newNodes {
-		if _, exists := r.nodes[node.Address]; !exists {
-			r.nodes[node.Address] = &Node{
-				ID:       node.Address,
-				Address:  node.Address,
-				LastSeen: time.Now(),
-			}
-			log.Printf("Node %s added to registry\n", node.Address)
+		if _, exists := r.nodes[node.ID]; !exists {
+			r.nodes[node.ID] = &node
+			log.Printf("Node %s added to registry\n", node.ID)
 		}
 	}
 }
 
-func (c *ServiceRegistry) GetRandomPeer(exclude string) string {
+// GetRandomPeer returns a random peer, excluding the specified node
+func (c *ServiceRegistry) GetRandomPeer(exclude string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -117,8 +131,28 @@ func (c *ServiceRegistry) GetRandomPeer(exclude string) string {
 	}
 
 	if len(peers) == 0 {
-		return ""
+		return "", false
 	}
 
-	return peers[rand.Intn(len(peers))] // Select a random peer
+	return peers[rand.Intn(len(peers))], true
+}
+
+// Cleanup removes nodes that haven't been seen within the timeout duration
+func (r *ServiceRegistry) Cleanup(timeout time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for id, node := range r.nodes {
+		if time.Since(node.LastSeen) > timeout {
+			delete(r.nodes, id)
+			log.Printf("Node %s removed due to timeout\n", id)
+		}
+	}
+}
+
+// Size returns the number of active nodes
+func (r *ServiceRegistry) Size() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.nodes)
 }

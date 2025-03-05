@@ -35,6 +35,11 @@ func (n *Handler) IncrementHandler(c *gin.Context) {
 		return
 	}
 
+	if n.counter.WasProcessed(requestID) {
+		log.Printf("Skipping already processed request ID: %s", requestID)
+		return
+	}
+
 	n.counter.Increment(requestID)
 	n.propagateIncrement(requestID)
 	c.JSON(http.StatusOK, gin.H{"message": "Incremented"})
@@ -84,12 +89,13 @@ func (n *Handler) sendIncrementRequest(peer node.Node, requestID string) error {
 }
 
 func (n *Handler) propagateIncrement(requestID string) {
-	if n.counter.WasProcessed(requestID) {
-		log.Printf("Skipping already processed request ID: %s", requestID)
-		return
-	}
 
 	peers := n.getPeersExceptSelf()
+
+	log.Printf("Propagating increment to %d peers", len(peers))
+
+	log.Println("Peers:", peers)
+
 	for _, peer := range peers {
 		go func(peer node.Node) {
 			if err := n.sendIncrementRequest(peer, requestID); err != nil {

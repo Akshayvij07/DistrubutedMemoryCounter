@@ -11,7 +11,7 @@ import (
 func ListenForOtherNodes(id string, cluster *ServiceRegistry) {
 	for {
 		time.Sleep(5 * time.Second) // Gossip every 5 seconds
-		peer := cluster.GetRandomPeer(id)
+		peer, _ := cluster.GetRandomPeer(id)
 		log.Println("Gossiping with", peer)
 		if peer != "" {
 			go gossipPeerList(peer, cluster)

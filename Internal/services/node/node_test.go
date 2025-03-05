@@ -46,7 +46,7 @@ func TestServiceRegistry(t *testing.T) {
 
 	// Test GetRandomPeer
 	exclude := "localhost:7070"
-	randomPeer := registry.GetRandomPeer(exclude)
+	randomPeer, _ := registry.GetRandomPeer(exclude)
 	if randomPeer == exclude {
 		t.Errorf("GetRandomPeer failed: returned excluded peer %s", randomPeer)
 	}
