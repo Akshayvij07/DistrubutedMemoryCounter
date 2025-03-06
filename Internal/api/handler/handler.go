@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,7 +9,6 @@ import (
 	"github.com/Akshayvij07/D-inmemory-counter/Internal/services/counter"
 	"github.com/Akshayvij07/D-inmemory-counter/Internal/services/node"
 	"github.com/Akshayvij07/D-inmemory-counter/Internal/services/retryqueue"
-	"github.com/Akshayvij07/D-inmemory-counter/pkg/helpers"
 	"github.com/gin-gonic/gin"
 )
 
@@ -34,19 +32,25 @@ func New(registry node.Registry, counter counter.CounterService, port string, id
 }
 func (n *Handler) IncrementHandler(c *gin.Context) {
 	requestID := c.GetHeader("X-Request-ID")
-	if requestID == "" {
+	if requestID != "" {
+		n.counter.Increment(requestID)
+		c.JSON(http.StatusOK, gin.H{"message": "Incremented"})
+		return
+	}
+	cRequestID := c.GetHeader("Client-Request-ID")
+	if cRequestID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing X-Request-ID header"})
 		return
 	}
 
-	if n.counter.WasProcessed(requestID) {
-		log.Printf("Skipping already processed request ID: %s", requestID)
+	if n.counter.WasProcessed(cRequestID) {
+		log.Printf("Skipping already processed request ID: %s", cRequestID)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Duplicate request ID"})
 		return
 	}
 
-	n.counter.Increment(requestID)
-	n.propagateIncrement(requestID)
+	n.counter.Increment(cRequestID)
+	n.propagateIncrement(cRequestID)
 	c.JSON(http.StatusOK, gin.H{"message": "Incremented"})
 }
 
@@ -91,6 +95,7 @@ func (n *Handler) SendIncrementRequest(peer node.Node, requestID string) error {
 		return err
 	}
 	req.Header.Set("X-Request-ID", requestID)
+	req.Header.Set("X-Origin-Node", n.id) // Include the origin node ID
 
 	log.Printf("Sending increment to %s with request ID: %s", peer.ID, requestID)
 
@@ -115,53 +120,64 @@ func (n *Handler) SendIncrementRequest(peer node.Node, requestID string) error {
 
 	return nil
 }
+
 func (n *Handler) RetryRequest() {
+	log.Printf("RetryRequest called\n")
+
 	requests := n.retryQueue.GetRetryRequest()
-	if len(requests) > 0 {
-		limiter := time.NewTicker(100 * time.Millisecond) // Allow 10 retries per second
-		defer limiter.Stop()
 
-		for _, request := range requests {
-			go func(request retryqueue.RetryRequest) {
-				// Check if the peer is unresponsive
-				if n.registry.IsPeerUnresponsive(request.Peer.Port) {
-					log.Printf("Peer %s is unresponsive. Skipping retry for now.\n", request.Peer.ID)
-					if helpers.IsPortAvailable(request.Peer.Port) {
-						n.registry.MarkPeerResponsive(request.Peer.Port)
-					}
-					n.retryQueue.Enqueue(request.Peer, request.RequestID) // Re-enqueue for later retry
-					return
-				}
+	log.Println("Number of requests to retry:", len(requests))
 
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Set a timeout
-				defer cancel()
+	if len(requests) == 0 {
+		return // No requests to retry
+	}
 
-				// Exponential backoff
-				backoff := 1 * time.Second
-				maxRetries := 5
+	for _, request := range requests {
+		go func(req retryqueue.RetryRequest) {
+			limiter := time.NewTicker(100 * time.Millisecond)
+			defer limiter.Stop()
+			n.processRetryRequest(req, limiter)
+		}(request)
+	}
+}
 
-				for i := 0; i < maxRetries; i++ {
-					select {
-					case <-ctx.Done():
-						log.Printf("Retry for peer %s canceled: %v\n", request.Peer.ID, ctx.Err())
-						return
-					case <-limiter.C: // Rate limit
-						err := n.SendIncrementRequest(request.Peer, request.RequestID)
-						if err == nil {
-							log.Printf("Successfully retried increment to peer %s\n", request.Peer.ID)
-							return
-						}
+// processRetryRequest handles a single retry request with exponential backoff
+func (n *Handler) processRetryRequest(request retryqueue.RetryRequest, limiter *time.Ticker) {
+	log.Print("processRetryRequest called\n")
+	// Check if the peer is unresponsive
+	if n.registry.IsPeerUnresponsive(request.Peer.Port) {
+		log.Printf("Peer %s is unresponsive. Skipping retry for now.\n", request.Peer.ID)
+		n.retryQueue.Enqueue(request.Peer, request.RequestID) // Re-enqueue for later retry
+		return
+	}
 
-						log.Printf("Failed to retry increment to peer %s (attempt %d/%d): %v\n", request.Peer.ID, i+1, maxRetries, err)
-						time.Sleep(backoff)
-						backoff *= 2 // Double the backoff time
-					}
-				}
+	log.Print("Peer is responsive\n")
 
-				// If all retries fail, re-enqueue the request
-				n.retryQueue.Enqueue(request.Peer, request.RequestID)
-				log.Printf("Max retries reached for peer %s. Re-enqueuing request.\n", request.Peer.ID)
-			}(request)
+	backoff := 1 * time.Second
+	maxRetries := 5
+	maxBackoff := 30 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		<-limiter.C
+
+		err := n.SendIncrementRequest(request.Peer, request.RequestID)
+		if err == nil {
+			log.Printf("Successfully retried increment to peer %s\n", request.Peer.ID)
+			n.registry.MarkPeerResponsive(request.Peer.ID)
+			n.retryQueue.Dequeue()
+			return
+		}
+
+		log.Printf("Failed to retry increment to peer %s (attempt %d/%d): %v\n", request.Peer.ID, i+1, maxRetries, err)
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
+
+	time.AfterFunc(5*time.Second, func() {
+		n.retryQueue.Enqueue(request.Peer, request.RequestID)
+	})
+	log.Printf("Max retries reached for peer %s. Re-enqueuing request.\n", request.Peer.ID)
 }
