@@ -32,7 +32,6 @@ func NewCluster(port string, peers []string, registry *node.ServiceRegistry, han
 }
 
 func (c *Cluster) StartNode() {
-
 	// c.ServiceRegistry.RegisterNode(c.port)
 	if len(c.peers) > 0 {
 		var allPeers []node.Node
@@ -60,38 +59,14 @@ func (c *Cluster) StartNode() {
 		}
 	}()
 
-	go c.monitorUnresponsivePeers()
-
 	// Start a goroutine to periodically retry failed requests
 	go c.retryFailedRequests()
-
-	// go func() {
-	// 	for {
-	// 		c.handler.RetryRequest()
-	// 		time.Sleep(5 * time.Second) // Adjust retry interval as needed
-	// 	}
-	// }()
 
 	go c.sendHeartbeats()
 	go c.broadcastNewNode()
 	go c.listenForHeartbeats()
 	go c.RemoveUnresponsiveNodes()
 	go c.ListenForOtherNodes()
-}
-
-func (c *Cluster) monitorUnresponsivePeers() {
-	for {
-		peers := c.ServiceRegistry.ListNodes()
-		for _, peer := range peers {
-			if peer.Unresponsive && helpers.IsPortAvailable(peer.Port) {
-
-				log.Println("Marking peer", peer.ID, "as responsive")
-
-				c.ServiceRegistry.MarkPeerResponsive(peer.ID)
-			}
-		}
-		time.Sleep(5 * time.Second) // Adjust interval as needed
-	}
 }
 
 // retryFailedRequests periodically processes the retry queue
